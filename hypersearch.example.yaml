@@ -1,0 +1,23 @@
+# HyperSearch Configuration
+# Copy to `hypersearch.yaml` and customize for your deployment.
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 1                        # Keep at 1 unless you have >8GB RAM
+  api_key: null                     # Set a string to enable X-API-Key auth
+
+storage:
+  data_dir: "./data"                # Base directory for .duckdb collection files
+  snapshot_dir: "./snapshots"       # Directory for backup snapshots
+
+embedding:
+  model: "all-MiniLM-L6-v2"        # Any sentence-transformers model name
+  batch_size: 256                   # Rows per embedding batch (lower = less RAM)
+  device: "cpu"                     # "cpu" or "cuda"
+  dimensions: 384                   # Must match the model's output dimensionality
+
+defaults:
+  search_template: "{text}"         # Python str.format_map() — column names as placeholders
+  metadata_columns: []              # Columns to preserve as filterable metadata (empty = all)
+  top_k: 10                         # Default number of search results
