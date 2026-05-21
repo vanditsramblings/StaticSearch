@@ -28,8 +28,9 @@ def _db_path(settings: Settings, name: str) -> Path:
 def _init_connection(path: Path) -> duckdb.DuckDBPyConnection:
     """Open a DuckDB connection and load the VSS extension."""
     conn = duckdb.connect(str(path))
-    conn.execute("INSTALL vss; LOAD vss;")
-    conn.execute("SET hnsw_enable_experimental_persistence = true;")
+    conn.execute("INSTALL vss")
+    conn.execute("LOAD vss")
+    conn.execute("SET hnsw_enable_experimental_persistence = true")
     logger.info("DuckDB connection opened: %s (VSS loaded)", path)
     return conn
 
@@ -66,6 +67,12 @@ def disconnect_all() -> None:
     """Shutdown hook — close every open connection."""
     for name in list(_connections):
         disconnect(name)
+
+
+def _reset() -> None:
+    """Reset all module-level state. Used by tests for isolation."""
+    disconnect_all()
+    _metadata.clear()
 
 
 def drop(settings: Settings, name: str) -> None:

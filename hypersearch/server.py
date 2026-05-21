@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from hypersearch import __version__
 from hypersearch.config import get_settings
@@ -43,6 +44,13 @@ def create_app() -> FastAPI:
     )
 
     # --- Middleware ---
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     app.add_middleware(ApiKeyMiddleware, api_key=settings.server.api_key)
 
     # --- Routers ---

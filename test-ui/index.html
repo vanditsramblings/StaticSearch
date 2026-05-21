@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HyperSearch CVE Demo</title>
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <header>
+            <div class="logo">
+                <div class="logo-icon"></div>
+                <h1>HyperSearch</h1>
+            </div>
+            <p class="subtitle">Semantic CVE Search Engine</p>
+        </header>
+
+        <main>
+            <div class="search-container">
+                <input type="text" id="searchInput" placeholder="Search vulnerabilities (e.g. 'SQL injection in web server')..." autocomplete="off">
+                <button id="searchButton" class="primary-btn">Search</button>
+            </div>
+
+            <div class="filters">
+                <span class="filter-label">Severity:</span>
+                <select id="severityFilter">
+                    <option value="ALL">All</option>
+                    <option value="CRITICAL">Critical</option>
+                    <option value="HIGH">High</option>
+                    <option value="MEDIUM">Medium</option>
+                    <option value="LOW">Low</option>
+                </select>
+                <div class="status" id="statusMessage"></div>
+            </div>
+
+            <div id="resultsContainer" class="results-container">
+                <!-- Results will be injected here -->
+                <div class="empty-state">
+                    <div class="pulse-circle"></div>
+                    <p>Enter a query to search the CVE database</p>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

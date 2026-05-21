@@ -223,3 +223,8 @@ snapshots/
 hypersearch.yaml
 *.duckdb
 *.duckdb.wal
+datasets/output/
+benchmarks/reports/
+openapi.json
+plan/*
+.DS_Store

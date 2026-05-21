@@ -24,7 +24,7 @@ def create_snapshot(settings: Settings, name: str) -> dict[str, str | int]:
     if not source.exists():
         raise FileNotFoundError(f"Collection '{name}' has no database file")
 
-    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     dest = settings.storage.snapshot_dir / f"{name}_{ts}.duckdb"
 
     shutil.copy2(source, dest)

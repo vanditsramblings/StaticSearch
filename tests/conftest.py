@@ -1,9 +1,8 @@
-"""Shared test fixtures."""
+"""Shared test fixtures — isolated per-test storage and properly reset state."""
 
 from __future__ import annotations
 
 import shutil
-import tempfile
 from pathlib import Path
 from typing import Iterator
 
@@ -11,7 +10,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hypersearch.config import Settings, get_settings
-from hypersearch.server import create_app
+from hypersearch.db import _reset as db_reset
+from hypersearch.metrics import _collector
+
+
+@pytest.fixture(autouse=True)
+def _isolate_db_state():
+    """Reset the global connection registry between tests."""
+    yield
+    db_reset()
 
 
 @pytest.fixture()
@@ -39,6 +46,8 @@ def settings(tmp_path: Path) -> Settings:
 @pytest.fixture()
 def client(settings: Settings) -> Iterator[TestClient]:
     """FastAPI test client wired to temporary storage."""
+    from hypersearch.server import create_app
+
     app = create_app()
     app.dependency_overrides[get_settings] = lambda: settings
 
