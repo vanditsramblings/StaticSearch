@@ -43,13 +43,14 @@ def promote_staging(settings: Settings, name: str) -> None:
     Uses ``Path.replace()`` which maps to ``os.replace()`` — atomic on POSIX
     when source and target are on the same filesystem.
     """
-    from hypersearch.db import swap_connection
+    from hypersearch.db import invalidate_column_cache, swap_connection
 
     stage = staging_path(settings, name)
     if not stage.exists():
         raise FileNotFoundError(f"No staging file for collection '{name}'")
 
     swap_connection(settings, name, stage)
+    invalidate_column_cache(name)
     logger.info("Promoted staging → live for '%s'", name)
 
 

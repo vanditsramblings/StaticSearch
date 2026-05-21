@@ -27,6 +27,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.storage.data_dir,
         settings.embedding.model,
     )
+
+    # Pre-load the embedding model and warm JIT/caches
+    from hypersearch.embeddings import configure_cache, warmup
+    configure_cache(settings.embedding.query_cache_size)
+    warmup(model_name=settings.embedding.model, device=settings.embedding.device)
+
     yield
     disconnect_all()
     logger.info("HyperSearch shutdown complete")

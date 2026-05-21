@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Phase 6-8: Tiered Benchmarking & Resource Profiling Pipeline.
+"""Tiered Benchmarking & Resource Profiling Pipeline.
 
 Runs the complete HyperSearch pipeline locally (no server needed):
-1. Generate deterministic synthetic datasets at 3 scales
+1. Prepare datasets at requested tiers (subset from NVD or CVE summary data)
 2. Ingest + embed + index each dataset
-3. Run search benchmarks with concurrent queries
+3. Run search benchmarks with multiple query categories
 4. Measure RAM watermarks, CPU utilization, latency percentiles
-5. Output a sizing recommendation matrix
+5. Output detailed reports with per-tier analysis
 
 Usage:
-    python -m benchmarks.pipeline                    # Run all tiers
-    python -m benchmarks.pipeline --tiers 1000,5000  # Custom tiers (for testing)
-    python -m benchmarks.pipeline --skip-ingest      # Reuse existing collections
+    python -m benchmarks.pipeline                           # Default tiers
+    python -m benchmarks.pipeline --tiers 10000,100000,150000,200000
+    python -m benchmarks.pipeline --skip-ingest             # Reuse existing collections
+    python -m benchmarks.pipeline --dataset datasets/output/nvd_full.csv
 
 Output:
     benchmarks/reports/pipeline_<timestamp>.json
@@ -45,31 +46,51 @@ logger = logging.getLogger("benchmarks.pipeline")
 REPORTS_DIR = Path(__file__).parent / "reports"
 
 # ---------------------------------------------------------------------------
-# Benchmark queries — realistic security-domain search terms
+# Benchmark queries — diverse security-domain search terms
 # ---------------------------------------------------------------------------
 
-BENCHMARK_QUERIES = [
-    "remote code execution vulnerability in web server",
-    "SQL injection attack on database",
-    "cross-site scripting XSS reflected stored",
-    "buffer overflow memory corruption exploit",
-    "authentication bypass unauthorized access",
-    "privilege escalation local root administrator",
-    "denial of service crash resource exhaustion",
-    "path traversal directory access file read",
-    "use after free heap overflow corruption",
-    "information disclosure sensitive data leak",
-    "server-side request forgery SSRF internal",
-    "deserialization untrusted data object injection",
-    "command injection shell execution system",
-    "integer overflow numeric error calculation",
-    "race condition TOCTOU time of check",
-    "XML external entity injection XXE parser",
-    "insecure cryptographic algorithm weak cipher",
-    "certificate validation bypass TLS SSL",
-    "open redirect URL manipulation phishing",
-    "memory leak resource exhaustion out of memory",
-]
+BENCHMARK_QUERIES = {
+    "exact_term": [
+        "buffer overflow",
+        "SQL injection",
+        "cross-site scripting",
+        "remote code execution",
+        "denial of service",
+    ],
+    "natural_language": [
+        "remote code execution vulnerability in web server",
+        "SQL injection attack on database login form",
+        "cross-site scripting XSS reflected stored DOM",
+        "buffer overflow memory corruption exploit in parser",
+        "authentication bypass unauthorized access to admin panel",
+    ],
+    "short_prefix": [
+        "buffer",
+        "overflow",
+        "injection",
+        "memory",
+        "remote",
+    ],
+    "complex_multi_term": [
+        "privilege escalation local root administrator kernel",
+        "denial of service crash resource exhaustion infinite loop",
+        "path traversal directory access file read write arbitrary",
+        "use after free heap overflow corruption pointer dereference",
+        "information disclosure sensitive data leak exposure credentials",
+    ],
+    "typeahead_progressive": [
+        "buf",
+        "buff",
+        "buffe",
+        "buffer",
+        "buffer ov",
+        "buffer over",
+        "buffer overf",
+        "buffer overflow",
+        "buffer overflow ex",
+        "buffer overflow exception",
+    ],
+}
 
 
 @dataclass
@@ -77,23 +98,27 @@ class TierResult:
     """Results for a single dataset tier."""
 
     tier_rows: int
+    actual_rows: int = 0
     ingest_time_seconds: float = 0.0
     embed_time_seconds: float = 0.0
     index_time_seconds: float = 0.0
     peak_ram_mb: float = 0.0
     steady_state_ram_mb: float = 0.0
     db_size_bytes: int = 0
-    search_latencies: dict[int, dict[str, float]] = field(default_factory=dict)
+    csv_size_bytes: int = 0
+    search_latencies: dict[str, dict[str, float]] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
             "tier_rows": self.tier_rows,
+            "actual_rows": self.actual_rows,
             "ingest_time_seconds": round(self.ingest_time_seconds, 2),
             "embed_time_seconds": round(self.embed_time_seconds, 2),
             "index_time_seconds": round(self.index_time_seconds, 2),
             "peak_ram_mb": round(self.peak_ram_mb, 2),
             "steady_state_ram_mb": round(self.steady_state_ram_mb, 2),
             "db_size_mb": round(self.db_size_bytes / (1024 * 1024), 2),
+            "csv_size_mb": round(self.csv_size_bytes / (1024 * 1024), 2),
             "search_latencies": self.search_latencies,
         }
 
@@ -105,15 +130,45 @@ def _get_rss_mb() -> float:
     return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
 
 
+def prepare_dataset(source_csv: Path, target_csv: Path, limit: int) -> int:
+    """Prepare a tier-specific dataset by subsetting the source CSV.
+
+    Returns the actual number of rows written.
+    """
+    import polars as pl
+
+    if target_csv.exists():
+        # Check if it already has enough rows
+        existing = pl.read_csv(target_csv, n_rows=1)
+        existing_count = pl.scan_csv(target_csv).select(pl.len()).collect().item()
+        if existing_count >= limit:
+            logger.info("Tier dataset already exists: %s (%d rows)", target_csv, existing_count)
+            return existing_count
+
+    logger.info("Preparing tier dataset: %d rows from %s", limit, source_csv)
+    df = pl.read_csv(source_csv, infer_schema_length=10000)
+
+    # Shuffle deterministically and take the first `limit` rows
+    if len(df) > limit:
+        df = df.head(limit)
+
+    df.write_csv(target_csv)
+    logger.info("Wrote %d rows to %s", len(df), target_csv)
+    return len(df)
+
+
 def run_tier(
     tier_rows: int,
-    concurrency_levels: list[int],
+    source_csv: Path,
     data_dir: Path,
     reuse: bool = False,
+    search_template: str = "{cve} {description}",
+    metadata_columns: list[str] | None = None,
 ) -> TierResult:
     """Run the full pipeline for a single tier size."""
     from hypersearch.config import Settings
     from hypersearch.db import _init_connection, _reset, table_exists
+    from hypersearch.embeddings import clear_cache
     from hypersearch.ingest import ingest_file
 
     result = TierResult(tier_rows=tier_rows)
@@ -124,24 +179,30 @@ def run_tier(
     logger.info("TIER: %d rows", tier_rows)
     logger.info("=" * 60)
 
+    # Detect metadata columns from the source CSV
+    if metadata_columns is None:
+        import polars as pl
+        sample = pl.read_csv(source_csv, n_rows=1)
+        # Use common CVE columns if they exist
+        available = set(sample.columns)
+        meta_candidates = ["cve", "severity", "cvss_score", "cwe_id", "vendor", "product",
+                          "attack_vector", "published", "technologies"]
+        metadata_columns = [c for c in meta_candidates if c in available]
+        if not metadata_columns:
+            metadata_columns = [c for c in sample.columns if c != "description"][:5]
+
     settings = Settings(
         storage={"data_dir": str(data_dir), "snapshot_dir": str(data_dir / "snapshots")},
-        embedding={"batch_size": 256},
+        embedding={"batch_size": 512},  # Larger batches for throughput
     )
 
     # -----------------------------------------------------------------------
-    # Phase 1: Generate dataset
+    # Phase 1: Prepare dataset
     # -----------------------------------------------------------------------
-    from datasets.fetch_cve_summary import download_cve_summary, normalize_rows, save_csv
-
-    csv_path = data_dir / f"cve_{tier_rows}.csv"
-    if not csv_path.exists() or not reuse:
-        logger.info("Fetching %d CVE rows …", tier_rows)
-        rows = download_cve_summary(limit=tier_rows)
-        rows = normalize_rows(rows)
-        save_csv(rows, csv_path)
-        del rows
-        gc.collect()
+    tier_csv = data_dir / f"tier_{tier_rows}.csv"
+    actual_rows = prepare_dataset(source_csv, tier_csv, tier_rows)
+    result.actual_rows = actual_rows
+    result.csv_size_bytes = tier_csv.stat().st_size
 
     # -----------------------------------------------------------------------
     # Phase 2: Ingest + Embed + Index
@@ -152,6 +213,11 @@ def run_tier(
         # Remove old DB
         if db_path.exists():
             db_path.unlink()
+            # Clean up WAL files
+            for suffix in (".wal", ".tmp"):
+                wal = db_path.with_suffix(db_path.suffix + suffix)
+                if wal.exists():
+                    wal.unlink()
 
         ram_before = _get_rss_mb()
         t_ingest_start = time.perf_counter()
@@ -160,11 +226,11 @@ def run_tier(
 
         rows_ingested = ingest_file(
             conn,
-            csv_path,
-            filename=csv_path.name,
+            tier_csv,
+            filename=tier_csv.name,
             settings=settings,
-            search_template="{cve} {description}",
-            metadata_columns=["cve", "severity", "cvss_score"],
+            search_template=search_template,
+            metadata_columns=metadata_columns,
         )
 
         t_ingest_end = time.perf_counter()
@@ -172,6 +238,7 @@ def run_tier(
 
         result.ingest_time_seconds = t_ingest_end - t_ingest_start
         result.peak_ram_mb = max(ram_before, ram_after)
+        result.actual_rows = rows_ingested
 
         conn.close()
         gc.collect()
@@ -187,7 +254,7 @@ def run_tier(
     result.db_size_bytes = db_path.stat().st_size if db_path.exists() else 0
 
     # -----------------------------------------------------------------------
-    # Phase 3: Search benchmarks at various concurrency levels
+    # Phase 3: Search benchmarks
     # -----------------------------------------------------------------------
     from hypersearch.engine import search as run_search
 
@@ -195,14 +262,17 @@ def run_tier(
     conn = _init_connection(db_path)
     result.steady_state_ram_mb = _get_rss_mb()
 
-    for concurrency in concurrency_levels:
-        logger.info("Search benchmark: concurrency=%d …", concurrency)
-        latencies = _bench_search(conn, settings, concurrency)
+    # Clear embedding cache to get cold-start metrics first
+    clear_cache()
+
+    for category, queries in BENCHMARK_QUERIES.items():
+        logger.info("Search benchmark: %s (%d queries) …", category, len(queries))
+        latencies = _bench_search_category(conn, settings, queries)
 
         if latencies:
             latencies.sort()
             n = len(latencies)
-            result.search_latencies[concurrency] = {
+            result.search_latencies[category] = {
                 "p50_ms": round(latencies[int(n * 0.50)], 2),
                 "p95_ms": round(latencies[int(n * 0.95)], 2),
                 "p99_ms": round(latencies[int(n * 0.99)], 2),
@@ -211,11 +281,27 @@ def run_tier(
                 "max_ms": round(max(latencies), 2),
                 "queries": n,
             }
-            pcts = result.search_latencies[concurrency]
+            pcts = result.search_latencies[category]
             logger.info(
-                "  p50=%.1fms  p95=%.1fms  p99=%.1fms  (n=%d)",
-                pcts["p50_ms"], pcts["p95_ms"], pcts["p99_ms"], n,
+                "  %s: p50=%.1fms  p95=%.1fms  mean=%.1fms  (n=%d)",
+                category, pcts["p50_ms"], pcts["p95_ms"], pcts["mean_ms"], n,
             )
+
+    # Run typeahead-specific benchmark (cached queries)
+    logger.info("Search benchmark: typeahead_cached (cached repeat) …")
+    cached_latencies = _bench_search_category(conn, settings, BENCHMARK_QUERIES["typeahead_progressive"])
+    if cached_latencies:
+        cached_latencies.sort()
+        n = len(cached_latencies)
+        result.search_latencies["typeahead_cached"] = {
+            "p50_ms": round(cached_latencies[int(n * 0.50)], 2),
+            "p95_ms": round(cached_latencies[int(n * 0.95)], 2),
+            "p99_ms": round(cached_latencies[int(n * 0.99)], 2),
+            "mean_ms": round(statistics.mean(cached_latencies), 2),
+            "min_ms": round(min(cached_latencies), 2),
+            "max_ms": round(max(cached_latencies), 2),
+            "queries": n,
+        }
 
     conn.close()
     _reset()
@@ -224,31 +310,18 @@ def run_tier(
     return result
 
 
-def _bench_search(conn, settings, concurrency: int, n_queries: int = 50) -> list[float]:
-    """Run search queries at the given concurrency and return latency list."""
+def _bench_search_category(conn, settings, queries: list[str]) -> list[float]:
+    """Run search queries sequentially and return latency list."""
     from hypersearch.engine import search as run_search
 
-    queries = (BENCHMARK_QUERIES * ((n_queries // len(BENCHMARK_QUERIES)) + 1))[:n_queries]
     latencies: list[float] = []
 
-    if concurrency <= 1:
-        # Sequential
-        for q in queries:
+    for q in queries:
+        try:
             _, latency = run_search(conn, q, settings=settings, top_k=10)
             latencies.append(latency)
-    else:
-        # Concurrent using threads
-        def _do(q: str) -> float:
-            _, lat = run_search(conn, q, settings=settings, top_k=10)
-            return lat
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futures = [pool.submit(_do, q) for q in queries]
-            for f in concurrent.futures.as_completed(futures):
-                try:
-                    latencies.append(f.result())
-                except Exception as exc:
-                    logger.warning("Search failed: %s", exc)
+        except Exception as exc:
+            logger.warning("Search failed for '%s': %s", q, exc)
 
     return latencies
 
@@ -256,48 +329,86 @@ def _bench_search(conn, settings, concurrency: int, n_queries: int = 50) -> list
 def generate_sizing_matrix(results: list[TierResult]) -> str:
     """Render the hardware recommendation matrix as markdown."""
     lines = [
-        "# HyperSearch — Hardware Sizing Matrix",
+        "# HyperSearch — Benchmark Results & Sizing Matrix",
         "",
-        "Generated: " + datetime.now(tz=timezone.utc).isoformat(),
+        f"Generated: {datetime.now(tz=timezone.utc).isoformat()}",
         "",
-        "| Dataset Size | Ingest Time | Peak RAM | Steady RAM | DB Size | p50 Latency | p95 Latency | p99 Latency |",
-        "|---|---|---|---|---|---|---|---|",
+        "## Ingestion Performance",
+        "",
+        "| Dataset Size | Actual Rows | Ingest Time | Peak RAM | Steady RAM | DB Size | CSV Size |",
+        "|---|---|---|---|---|---|---|",
     ]
 
     for r in results:
-        # Get latency at concurrency=1 for the baseline
-        lat = r.search_latencies.get(1, {})
         lines.append(
-            f"| **{r.tier_rows:,}** | {r.ingest_time_seconds:.1f}s "
+            f"| **{r.tier_rows:,}** | {r.actual_rows:,} | {r.ingest_time_seconds:.1f}s "
             f"| {r.peak_ram_mb:.0f} MB | {r.steady_state_ram_mb:.0f} MB "
             f"| {r.db_size_bytes / (1024 * 1024):.1f} MB "
-            f"| {lat.get('p50_ms', 'N/A')} ms | {lat.get('p95_ms', 'N/A')} ms "
-            f"| {lat.get('p99_ms', 'N/A')} ms |"
+            f"| {r.csv_size_bytes / (1024 * 1024):.1f} MB |"
+        )
+
+    # Search latency table
+    lines.extend([
+        "",
+        "## Search Latency by Query Type",
+        "",
+        "| Dataset | Query Type | p50 (ms) | p95 (ms) | p99 (ms) | Mean (ms) | Min (ms) | Max (ms) |",
+        "|---|---|---|---|---|---|---|---|",
+    ])
+
+    for r in results:
+        for cat, lat in r.search_latencies.items():
+            lines.append(
+                f"| {r.tier_rows:,} | {cat} "
+                f"| {lat.get('p50_ms', 'N/A')} | {lat.get('p95_ms', 'N/A')} "
+                f"| {lat.get('p99_ms', 'N/A')} | {lat.get('mean_ms', 'N/A')} "
+                f"| {lat.get('min_ms', 'N/A')} | {lat.get('max_ms', 'N/A')} |"
+            )
+
+    # Scaling analysis
+    if len(results) >= 2:
+        lines.extend([
+            "",
+            "## Scaling Analysis",
+            "",
+            "| Metric | " + " | ".join(f"{r.tier_rows:,}" for r in results) + " |",
+            "|---| " + " | ".join(["---"] * len(results)) + " |",
+        ])
+
+        # Ingest throughput
+        throughputs = [r.actual_rows / r.ingest_time_seconds if r.ingest_time_seconds > 0 else 0 for r in results]
+        lines.append(
+            "| Ingest (rows/s) | " +
+            " | ".join(f"{t:.0f}" for t in throughputs) + " |"
+        )
+
+        # Mean search latency
+        for cat in ["exact_term", "natural_language", "typeahead_progressive", "typeahead_cached"]:
+            means = []
+            for r in results:
+                lat = r.search_latencies.get(cat, {})
+                means.append(f"{lat.get('mean_ms', 'N/A')}")
+            lines.append(
+                f"| Search mean ({cat}) | " + " | ".join(means) + " |"
+            )
+
+        # DB size per 1k rows
+        sizes = [r.db_size_bytes / (r.actual_rows / 1000) / 1024 if r.actual_rows > 0 else 0 for r in results]
+        lines.append(
+            "| DB size (KB/1k rows) | " +
+            " | ".join(f"{s:.1f}" for s in sizes) + " |"
         )
 
     lines.extend([
         "",
-        "### Concurrency Impact",
+        "## Notes",
         "",
-        "| Dataset Size | @1 p95 | @5 p95 | @10 p95 |",
-        "|---|---|---|---|",
-    ])
-
-    for r in results:
-        c1 = r.search_latencies.get(1, {}).get("p95_ms", "N/A")
-        c5 = r.search_latencies.get(5, {}).get("p95_ms", "N/A")
-        c10 = r.search_latencies.get(10, {}).get("p95_ms", "N/A")
-        lines.append(f"| **{r.tier_rows:,}** | {c1} ms | {c5} ms | {c10} ms |")
-
-    lines.extend([
-        "",
-        "### Notes",
-        "",
-        "- **Ingest Time** includes data loading, embedding, and HNSW index construction",
+        "- **Ingest Time** includes data loading, embedding generation, and HNSW index construction",
         "- **Peak RAM** is the maximum RSS during the embedding phase",
-        "- **Steady RAM** is the RSS after ingestion, with the HNSW index hot",
+        "- **Steady RAM** is the RSS after ingestion, with the HNSW index loaded",
         "- **Latencies** measured with `all-MiniLM-L6-v2` (384 dims) on CPU",
-        "- All benchmarks use cosine distance HNSW indexes",
+        "- **typeahead_cached** shows latency when query embeddings are already cached (repeat queries)",
+        "- All benchmarks use cosine distance HNSW indexes with M=48, ef_construction=256",
     ])
 
     return "\n".join(lines)
@@ -306,12 +417,20 @@ def generate_sizing_matrix(results: list[TierResult]) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="HyperSearch Tiered Benchmark Pipeline")
     parser.add_argument(
-        "--tiers", default="1000,5000,10000",
-        help="Comma-separated dataset sizes to benchmark (default: 1000,5000,10000)",
+        "--tiers", default="10000,100000,150000,200000",
+        help="Comma-separated dataset sizes (default: 10000,100000,150000,200000)",
     )
     parser.add_argument(
-        "--concurrency", default="1,5,10",
-        help="Comma-separated concurrency levels (default: 1,5,10)",
+        "--dataset", default=None,
+        help="Source CSV dataset path (default: auto-detect nvd_full.csv or cve_summary.csv)",
+    )
+    parser.add_argument(
+        "--template", default="{cve} {description}",
+        help="Search template for document construction",
+    )
+    parser.add_argument(
+        "--metadata", default=None,
+        help="Comma-separated metadata columns (default: auto-detect)",
     )
     parser.add_argument(
         "--data-dir", default=None,
@@ -324,18 +443,38 @@ def main() -> None:
     args = parser.parse_args()
 
     tiers = [int(t) for t in args.tiers.split(",")]
-    concurrency_levels = [int(c) for c in args.concurrency.split(",")]
     data_dir = Path(args.data_dir) if args.data_dir else Path("./data/bench")
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "snapshots").mkdir(exist_ok=True)
 
+    # Auto-detect dataset
+    if args.dataset:
+        source_csv = Path(args.dataset)
+    else:
+        nvd_full = Path("datasets/output/nvd_full.csv")
+        cve_summary = Path("datasets/output/cve_summary.csv")
+        if nvd_full.exists():
+            source_csv = nvd_full
+        elif cve_summary.exists():
+            source_csv = cve_summary
+        else:
+            logger.error("No dataset found. Run 'python -m datasets.fetch_nvd_full' first.")
+            sys.exit(1)
+
+    metadata_cols = [c.strip() for c in args.metadata.split(",")] if args.metadata else None
+
     logger.info("HyperSearch Benchmark Pipeline")
-    logger.info("Tiers: %s | Concurrency: %s", tiers, concurrency_levels)
+    logger.info("Tiers: %s | Dataset: %s", tiers, source_csv)
 
     all_results: list[TierResult] = []
 
     for tier in tiers:
-        result = run_tier(tier, concurrency_levels, data_dir, reuse=args.skip_ingest)
+        result = run_tier(
+            tier, source_csv, data_dir,
+            reuse=args.skip_ingest,
+            search_template=args.template,
+            metadata_columns=metadata_cols,
+        )
         all_results.append(result)
 
     # -----------------------------------------------------------------------
@@ -352,6 +491,7 @@ def main() -> None:
             "python": sys.version,
             "pid": os.getpid(),
         },
+        "source_dataset": str(source_csv),
         "tiers": [r.to_dict() for r in all_results],
     }
     with open(json_path, "w") as fh:

@@ -33,6 +33,12 @@ class EmbeddingConfig(BaseModel):
     batch_size: int = 256
     device: str = "cpu"
     dimensions: int = 384
+    # HNSW index tuning — higher values = better recall but slower build/search
+    hnsw_m: int = 48                    # Max edges per node (default 16, higher for large datasets)
+    hnsw_ef_construction: int = 256     # Build-time beam width (default 200)
+    hnsw_ef_search: int = 128           # Query-time beam width (default 64, higher = better recall)
+    # Query embedding cache for typeahead performance
+    query_cache_size: int = 2048        # LRU cache entries for query embeddings
 
 
 class DefaultsConfig(BaseModel):

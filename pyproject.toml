@@ -24,6 +24,7 @@ dependencies = [
 
     # === Data Processing ===
     "polars>=1.17,<2.0",
+    "pyarrow>=14.0",
 
     # === CLI ===
     "typer>=0.15,<1.0",

@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 _connections: dict[str, duckdb.DuckDBPyConnection] = {}
 _metadata: dict[str, dict[str, Any]] = {}
+_column_cache: dict[str, list[str]] = {}  # collection_name → user column names
 
 
 def _db_path(settings: Settings, name: str) -> Path:
@@ -73,6 +74,7 @@ def _reset() -> None:
     """Reset all module-level state. Used by tests for isolation."""
     disconnect_all()
     _metadata.clear()
+    _column_cache.clear()
 
 
 def drop(settings: Settings, name: str) -> None:
@@ -143,6 +145,21 @@ def _count_rows(conn: duckdb.DuckDBPyConnection) -> int:
         return 0
     result = conn.execute("SELECT COUNT(*) FROM documents").fetchone()
     return result[0] if result else 0
+
+
+def get_cached_columns(name: str) -> list[str] | None:
+    """Return cached user columns for *name*, or None if not cached."""
+    return _column_cache.get(name)
+
+
+def set_cached_columns(name: str, columns: list[str]) -> None:
+    """Cache user columns for *name*."""
+    _column_cache[name] = columns
+
+
+def invalidate_column_cache(name: str) -> None:
+    """Invalidate the column cache for *name*. Call after ingest."""
+    _column_cache.pop(name, None)
 
 
 def _read_creation_time(path: Path) -> str:

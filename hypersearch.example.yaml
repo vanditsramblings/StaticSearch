@@ -16,6 +16,12 @@ embedding:
   batch_size: 256                   # Rows per embedding batch (lower = less RAM)
   device: "cpu"                     # "cpu" or "cuda"
   dimensions: 384                   # Must match the model's output dimensionality
+  # HNSW index tuning — increase for better recall on large datasets
+  hnsw_m: 48                        # Max edges per node (16-64, higher = better recall)
+  hnsw_ef_construction: 256         # Build-time beam width (100-500)
+  hnsw_ef_search: 128               # Query-time beam width (64-256)
+  # Query embedding cache for typeahead performance
+  query_cache_size: 2048            # LRU cache entries for query embeddings
 
 defaults:
   search_template: "{text}"         # Python str.format_map() — column names as placeholders
