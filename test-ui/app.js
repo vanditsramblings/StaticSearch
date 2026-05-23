@@ -1,8 +1,7 @@
-const API_URL = 'http://127.0.0.1:8000/v1/collections/bench_1000/search'; // Using the benchmark collection for demo
-
 document.addEventListener('DOMContentLoaded', () => {
     const searchInput = document.getElementById('searchInput');
     const searchButton = document.getElementById('searchButton');
+    const datasetFilter = document.getElementById('datasetFilter');
     const severityFilter = document.getElementById('severityFilter');
     const resultsContainer = document.getElementById('resultsContainer');
     const statusMessage = document.getElementById('statusMessage');
@@ -20,10 +19,17 @@ document.addEventListener('DOMContentLoaded', () => {
             performSearch();
         }
     });
+    datasetFilter.addEventListener('change', () => {
+        if (searchInput.value.trim() !== '') {
+            performSearch();
+        }
+    });
 
     async function performSearch() {
         const query = searchInput.value.trim();
         const severity = severityFilter.value;
+        const collection = datasetFilter.value;
+        const apiUrl = `http://127.0.0.1:8000/v1/collections/${collection}/search`;
         
         if (!query) {
             statusMessage.textContent = 'Please enter a search query';
@@ -49,7 +55,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         try {
             const startTime = performance.now();
-            const response = await fetch(API_URL, {
+            const response = await fetch(apiUrl, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'

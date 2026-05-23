@@ -218,13 +218,8 @@ __marimo__/
 .streamlit/secrets.toml
 
 # HyperSearch
-data/
 snapshots/
 hypersearch.yaml
-*.duckdb
-*.duckdb.wal
-datasets/output/
-benchmarks/reports/
 openapi.json
 .DS_Store
 
