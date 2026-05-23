@@ -1,9 +1,41 @@
 [project]
 name = "hypersearch"
-version = "0.1.0"
-description = "BYOD semantic search engine — embedded DuckDB + local embeddings"
+version = "0.2.0"
+description = "BYOD semantic search engine — embedded DuckDB + local embeddings. Zero infrastructure, hyper-fast search over static data."
+readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
+keywords = [
+    "semantic-search",
+    "vector-search",
+    "embeddings",
+    "duckdb",
+    "hnsw",
+    "sentence-transformers",
+    "search-engine",
+    "static-data",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Database :: Database Engines/Servers",
+    "Topic :: Text Processing :: Indexing",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/vanditsramblings/StaticSearch"
+Repository = "https://github.com/vanditsramblings/StaticSearch"
+Issues = "https://github.com/vanditsramblings/StaticSearch/issues"
+Documentation = "https://github.com/vanditsramblings/StaticSearch#readme"
 
 dependencies = [
     # === Web Framework ===
@@ -20,7 +52,7 @@ dependencies = [
 
     # === ML / Embeddings ===
     "sentence-transformers>=3.3,<4.0",
-    "numpy>=1.26,<2.0",
+    "numpy>=1.26",
 
     # === Data Processing ===
     "polars>=1.17,<2.0",
@@ -43,6 +75,8 @@ dev = [
     "httpx>=0.28,<1.0",
     "ruff>=0.8,<1.0",
     "mypy>=1.13,<2.0",
+    "build>=1.0",
+    "twine>=6.0",
 ]
 
 bench = [
@@ -53,11 +87,12 @@ bench = [
 hypersearch = "hypersearch.cli:app"
 
 [build-system]
-requires = ["setuptools"]
+requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["hypersearch*"]
+exclude = ["tests*", "benchmarks*", "datasets*", "scripts*"]
 
 [tool.ruff]
 target-version = "py311"
@@ -73,3 +108,6 @@ strict = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "slow: marks tests that take >10 seconds (deselect with '-m \"not slow\"')",
+]

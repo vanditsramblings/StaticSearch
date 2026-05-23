@@ -27,12 +27,15 @@ import gc
 import json
 import logging
 import os
+import platform
 import statistics
 import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+import psutil
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -44,6 +47,23 @@ logging.basicConfig(
 logger = logging.getLogger("benchmarks.pipeline")
 
 REPORTS_DIR = Path(__file__).parent / "reports"
+
+
+def _get_system_info() -> dict:
+    """Collect system hardware and software info for benchmark reproducibility."""
+    cpu_freq = psutil.cpu_freq()
+    return {
+        "python": sys.version,
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "processor": platform.processor() or "Unknown",
+        "cpu_count_physical": psutil.cpu_count(logical=False),
+        "cpu_count_logical": psutil.cpu_count(logical=True),
+        "cpu_freq_mhz": round(cpu_freq.current, 0) if cpu_freq else None,
+        "ram_total_gb": round(psutil.virtual_memory().total / (1024**3), 1),
+        "os": f"{platform.system()} {platform.release()}",
+        "pid": os.getpid(),
+    }
 
 # ---------------------------------------------------------------------------
 # Benchmark queries — diverse security-domain search terms
@@ -310,9 +330,21 @@ def run_tier(
     return result
 
 
-def _bench_search_category(conn, settings, queries: list[str]) -> list[float]:
-    """Run search queries sequentially and return latency list."""
+def _bench_search_category(
+    conn, settings, queries: list[str], *, warmup: bool = True,
+) -> list[float]:
+    """Run search queries sequentially and return latency list.
+
+    When *warmup* is True, runs a single throwaway query first to
+    eliminate cold-start skew (DuckDB buffer pool, HNSW cache).
+    """
     from hypersearch.engine import search as run_search
+
+    if warmup:
+        try:
+            run_search(conn, "warmup query", settings=settings, top_k=1)
+        except Exception:
+            pass
 
     latencies: list[float] = []
 
@@ -326,18 +358,42 @@ def _bench_search_category(conn, settings, queries: list[str]) -> list[float]:
     return latencies
 
 
-def generate_sizing_matrix(results: list[TierResult]) -> str:
+def generate_sizing_matrix(
+    results: list[TierResult],
+    system_info: dict | None = None,
+) -> str:
     """Render the hardware recommendation matrix as markdown."""
     lines = [
         "# HyperSearch — Benchmark Results & Sizing Matrix",
         "",
-        f"Generated: {datetime.now(tz=timezone.utc).isoformat()}",
+        f"Generated: {datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
         "",
+    ]
+
+    # System info section
+    if system_info:
+        lines.extend([
+            "## System Configuration",
+            "",
+            "| Property | Value |",
+            "|---|---|",
+            f"| **OS** | {system_info.get('os', 'N/A')} |",
+            f"| **Platform** | {system_info.get('platform', 'N/A')} |",
+            f"| **Processor** | {system_info.get('processor', 'N/A')} |",
+            f"| **CPU Cores** | {system_info.get('cpu_count_physical', 'N/A')} physical / {system_info.get('cpu_count_logical', 'N/A')} logical |",
+            f"| **RAM** | {system_info.get('ram_total_gb', 'N/A')} GB |",
+            f"| **Python** | {system_info.get('python', 'N/A').split()[0]} |",
+            f"| **Embedding Model** | `all-MiniLM-L6-v2` (384 dims) |",
+            f"| **HNSW Config** | M=48, ef_construction=256, ef_search=128 |",
+            "",
+        ])
+
+    lines.extend([
         "## Ingestion Performance",
         "",
         "| Dataset Size | Actual Rows | Ingest Time | Peak RAM | Steady RAM | DB Size | CSV Size |",
         "|---|---|---|---|---|---|---|",
-    ]
+    ])
 
     for r in results:
         lines.append(
@@ -407,6 +463,7 @@ def generate_sizing_matrix(results: list[TierResult]) -> str:
         "- **Peak RAM** is the maximum RSS during the embedding phase",
         "- **Steady RAM** is the RSS after ingestion, with the HNSW index loaded",
         "- **Latencies** measured with `all-MiniLM-L6-v2` (384 dims) on CPU",
+        "- **Warmup query** is run before each category to eliminate cold-start skew",
         "- **typeahead_cached** shows latency when query embeddings are already cached (repeat queries)",
         "- All benchmarks use cosine distance HNSW indexes with M=48, ef_construction=256",
     ])
@@ -440,6 +497,10 @@ def main() -> None:
         "--skip-ingest", action="store_true",
         help="Reuse existing collections (skip ingest)",
     )
+    parser.add_argument(
+        "--output-md", default=None,
+        help="Write markdown results to this path (e.g., BENCHMARKS.md)",
+    )
     args = parser.parse_args()
 
     tiers = [int(t) for t in args.tiers.split(",")]
@@ -463,6 +524,11 @@ def main() -> None:
 
     metadata_cols = [c.strip() for c in args.metadata.split(",")] if args.metadata else None
 
+    # Collect system info
+    system_info = _get_system_info()
+    logger.info("System: %s, %d cores, %.1f GB RAM",
+                system_info["os"], system_info["cpu_count_logical"],
+                system_info["ram_total_gb"])
     logger.info("HyperSearch Benchmark Pipeline")
     logger.info("Tiers: %s | Dataset: %s", tiers, source_csv)
 
@@ -487,10 +553,7 @@ def main() -> None:
     json_path = REPORTS_DIR / f"pipeline_{ts}.json"
     report = {
         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-        "system": {
-            "python": sys.version,
-            "pid": os.getpid(),
-        },
+        "system": system_info,
         "source_dataset": str(source_csv),
         "tiers": [r.to_dict() for r in all_results],
     }
@@ -499,11 +562,19 @@ def main() -> None:
     logger.info("JSON report: %s", json_path)
 
     # Markdown sizing matrix
+    md_content = generate_sizing_matrix(all_results, system_info=system_info)
+
     md_path = REPORTS_DIR / "sizing_matrix.md"
-    md_content = generate_sizing_matrix(all_results)
     with open(md_path, "w") as fh:
         fh.write(md_content)
     logger.info("Sizing matrix: %s", md_path)
+
+    # Write to custom output path (e.g., BENCHMARKS.md at repo root)
+    if args.output_md:
+        output_md = Path(args.output_md)
+        with open(output_md, "w") as fh:
+            fh.write(md_content)
+        logger.info("Markdown report: %s", output_md)
 
     # Print summary
     print("\n" + md_content)

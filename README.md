@@ -1,53 +1,355 @@
 # HyperSearch
 
-**BYOD semantic search engine** — embedded DuckDB + local embeddings. Zero external infrastructure required.
+[![CI](https://github.com/vanditsramblings/StaticSearch/actions/workflows/ci.yml/badge.svg)](https://github.com/vanditsramblings/StaticSearch/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/hypersearch.svg)](https://pypi.org/project/hypersearch/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://python.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
+**Hyper-fast semantic search over static data.** Embedded DuckDB + local embeddings. Zero external infrastructure.
 
 HyperSearch is designed for **static or slow-mutating datasets** where you want lightning-fast vector similarity search without the complexity of distributed vector databases. Bring your own CSV, JSON, or Parquet data — HyperSearch handles embedding, indexing, and querying locally.
 
 ---
 
-## Features
+## Highlights
 
-- **Embedded vector storage** — DuckDB with HNSW indexes, one file per collection
-- **Local ML pipeline** — `sentence-transformers` embeddings, no API keys or cloud services
-- **BYOD flexibility** — Ingest CSV, JSON, or Parquet with automatic schema inference
-- **Rich search filters** — Combine vector similarity with SQL metadata filters (`$gt`, `$lt`, `$in`, `$between`)
-- **Zero-downtime ingestion** — Atomic hot-reload via staging database + pointer swap
-- **Snapshot/restore** — One-command backup and recovery
-- **Built-in benchmarking** — Latency percentiles (p50/p95/p99) under concurrent load
-- **OpenAPI spec** — Auto-generated, contract-driven API documentation
+- ⚡ **Sub-20ms search** — HNSW indexes on DuckDB, tuned for speed
+- 📦 **Zero infrastructure** — No servers, no cloud, no API keys. One `pip install`.
+- 🔄 **Full lifecycle** — Ingest → Embed → Search → Re-embed → Snapshot/Restore
+- 🎯 **Rich filters** — Combine vector similarity with SQL metadata filters
+- 🔒 **Atomic ingestion** — Zero-downtime hot-reload via staging + pointer swap
+- 🐍 **Python library + CLI + REST API** — Use however fits your workflow
+- 📊 **Built-in benchmarking** — Latency percentiles (p50/p95/p99) under load
 
-## Quick Start
+---
+
+## Installation
 
 ```bash
-# Clone and bootstrap (installs deps, downloads CVE dataset, starts server)
-git clone <repo-url> && cd StaticSearch
-./bootstrap.sh
-
-# Or step-by-step:
-./bootstrap.sh --install     # Install Python dependencies
-./bootstrap.sh --dataset     # Download CVE/EPSS demo dataset
-./bootstrap.sh --ingest      # Ingest into HyperSearch
-./bootstrap.sh --serve       # Start API server at http://127.0.0.1:8000
+pip install hypersearch
 ```
 
-### Manual Setup
+Or install from source:
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
+git clone https://github.com/vanditsramblings/StaticSearch.git && cd StaticSearch
 pip install -e ".[dev]"
+```
 
-# Copy and customize config
-cp hypersearch.example.yaml hypersearch.yaml
+> **Note:** The first import downloads the `all-MiniLM-L6-v2` embedding model (~80MB). Subsequent imports use the cached model.
 
-# Start the server
-hypersearch serve
-# or: python -m uvicorn hypersearch.server:app --host 0.0.0.0 --port 8000
+---
+
+## Quick Start — Python Library
+
+```python
+from hypersearch import HyperSearch
+
+# Initialize (creates data directory automatically)
+with HyperSearch(data_dir="./my_data") as hs:
+    # Create a collection
+    col = hs.create_collection("products")
+
+    # Ingest a CSV file
+    col.ingest(
+        "products.csv",
+        template="{name} {description}",
+        metadata_columns=["name", "category", "price"],
+    )
+
+    # Search
+    results = col.search("waterproof hiking boots", top_k=5)
+    for hit in results:
+        print(f"  {hit.score:.4f}  {hit.document[:80]}")
+        print(f"           {hit.metadata}")
+
+    # Search with filters
+    results = col.search(
+        "lightweight running shoes",
+        top_k=10,
+        filters={"category": "footwear", "price": {"$lt": 100}},
+    )
+
+    # Export results to a DataFrame
+    df = results.to_dataframe()
 ```
 
 ---
 
-## API Reference
+## Quick Start — CLI
+
+```bash
+# Start the API server
+hypersearch serve
+
+# Ingest a dataset
+hypersearch ingest my_collection data.csv \
+  --template "{title} {description}" \
+  --metadata "title,category,price"
+
+# Search from the terminal
+hypersearch search my_collection "waterproof hiking boots" --top-k 5
+
+# Backup a collection
+hypersearch snapshot my_collection
+
+# Restore from backup
+hypersearch restore my_collection snapshots/my_collection_20240101T120000Z.duckdb
+```
+
+---
+
+## Quick Start — REST API
+
+```bash
+# Start the server
+hypersearch serve --host 0.0.0.0 --port 8000
+
+# Create a collection
+curl -X POST http://127.0.0.1:8000/v1/collections \
+  -H "Content-Type: application/json" \
+  -d '{"name": "vulnerabilities"}'
+
+# Ingest a CSV dataset
+curl -X POST http://127.0.0.1:8000/v1/collections/vulnerabilities/ingest \
+  -F "file=@data.csv" \
+  -F 'config={"search_template": "{cve} {description}", "metadata_columns": ["cve", "cvss_score", "severity"]}'
+
+# Search
+curl -X POST http://127.0.0.1:8000/v1/collections/vulnerabilities/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "remote code execution buffer overflow", "top_k": 5}'
+
+# Search with metadata filters
+curl -X POST http://127.0.0.1:8000/v1/collections/vulnerabilities/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "SQL injection", "top_k": 10, "filters": {"severity": "CRITICAL"}}'
+```
+
+Full Swagger docs at **http://127.0.0.1:8000/docs** when the server is running.
+
+---
+
+## Library API Reference
+
+### `HyperSearch`
+
+The main client. Manages collections and configuration.
+
+```python
+from hypersearch import HyperSearch
+
+hs = HyperSearch(
+    data_dir="./data",              # Where .duckdb files are stored
+    snapshot_dir="./snapshots",     # Where backups go
+    model="all-MiniLM-L6-v2",      # Any sentence-transformers model
+    device="cpu",                   # "cpu" or "cuda"
+    batch_size=256,                 # Rows per embedding batch
+    hnsw_m=48,                      # HNSW max edges per node
+    hnsw_ef_construction=256,       # Build-time beam width
+    hnsw_ef_search=128,             # Query-time beam width
+)
+```
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `create_collection(name)` | `Collection` | Create a new collection |
+| `get_collection(name)` | `Collection` | Open an existing collection |
+| `list_collections()` | `list[dict]` | List all collections with metadata |
+| `delete_collection(name)` | `None` | Delete a collection and its data |
+| `close()` | `None` | Close all connections |
+
+Supports the context manager protocol (`with HyperSearch(...) as hs:`).
+
+### `Collection`
+
+Per-collection operations: ingest, search, reindex, snapshot, restore.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `ingest(source, *, template, metadata_columns, batch_size)` | `int` | Ingest a CSV/JSON/Parquet file |
+| `search(query, *, top_k, filters)` | `SearchResults` | Semantic search with optional filters |
+| `reindex(*, template, batch_size)` | `int` | Re-embed all documents |
+| `snapshot(dest_dir)` | `Path` | Create a backup snapshot |
+| `restore(snapshot_path)` | `None` | Restore from a snapshot |
+| `row_count` | `int` | Number of rows (property) |
+| `info` | `dict` | Collection metadata (property) |
+
+### `SearchResults` / `SearchHit`
+
+Ergonomic result objects with iteration, indexing, and DataFrame conversion.
+
+```python
+results = col.search("remote code execution", top_k=5)
+
+# Iterate
+for hit in results:
+    print(hit.score, hit.document, hit.metadata)
+
+# Index
+best = results[0]
+
+# Length
+print(f"Found {len(results)} results in {results.latency_ms:.1f}ms")
+
+# Convert to Polars DataFrame
+df = results.to_dataframe()
+
+# Convert to plain dicts
+dicts = results.to_dicts()
+```
+
+---
+
+## Full Lifecycle
+
+### 1. Ingest
+
+```python
+col = hs.create_collection("products")
+rows = col.ingest(
+    "products.csv",
+    template="{name} {description}",       # How to build the search document
+    metadata_columns=["name", "price"],    # Columns to store as filterable metadata
+    batch_size=512,                        # Embedding batch size
+)
+print(f"Ingested {rows:,} rows")
+```
+
+Supports **CSV**, **JSON**, **JSONL/NDJSON**, and **Parquet** files. Schema inference is automatic.
+
+### 2. Search
+
+```python
+results = col.search("waterproof boots", top_k=10)
+for hit in results:
+    print(f"  [{hit.score:.4f}] {hit.document[:80]}")
+```
+
+### 3. Search with Filters
+
+```python
+results = col.search(
+    "hiking gear",
+    top_k=10,
+    filters={
+        "category": "outdoor",                    # Equality
+        "price": {"$lt": 100},                    # Less than
+        "brand": {"$in": ["Nike", "Adidas"]},     # In set
+        "rating": {"$between": [4.0, 5.0]},       # Range
+    },
+)
+```
+
+### 4. Re-embed (Reindex)
+
+```python
+# Re-embed with a new template
+col.reindex(template="{name} {category} {description}")
+```
+
+### 5. Snapshot & Restore
+
+```python
+# Backup
+snap_path = col.snapshot()
+print(f"Backed up to {snap_path}")
+
+# Restore
+col.restore(snap_path)
+```
+
+---
+
+## Search Filter Operators
+
+| Operator | SQL Equivalent | Example |
+|----------|---------------|---------|
+| `value` | `= value` | `"severity": "HIGH"` |
+| `$eq` | `= value` | `{"$eq": "HIGH"}` |
+| `$neq` | `!= value` | `{"$neq": "LOW"}` |
+| `$gt` | `> value` | `{"$gt": 7.0}` |
+| `$gte` | `>= value` | `{"$gte": 7.0}` |
+| `$lt` | `< value` | `{"$lt": 5.0}` |
+| `$lte` | `<= value` | `{"$lte": 5.0}` |
+| `$in` | `IN (...)` | `{"$in": ["a", "b"]}` |
+| `$between` | `BETWEEN a AND b` | `{"$between": [1, 10]}` |
+
+---
+
+## Configuration
+
+### YAML Configuration
+
+Copy `hypersearch.example.yaml` to `hypersearch.yaml`:
+
+```yaml
+server:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 1
+  api_key: null                     # Set a string to enable X-API-Key auth
+
+storage:
+  data_dir: "./data"
+  snapshot_dir: "./snapshots"
+
+embedding:
+  model: "all-MiniLM-L6-v2"        # Any sentence-transformers model
+  batch_size: 256
+  device: "cpu"                     # "cpu" or "cuda"
+  dimensions: 384
+  hnsw_m: 48                        # Higher = better recall, slower build
+  hnsw_ef_construction: 256         # Higher = better index quality
+  hnsw_ef_search: 128               # Higher = better recall at query time
+  query_cache_size: 2048            # LRU cache for query embeddings
+
+defaults:
+  search_template: "{text}"
+  metadata_columns: []
+  top_k: 10
+```
+
+### Environment Variable Overrides
+
+Any config value can be overridden via environment variables with the `HYPER_` prefix:
+
+```bash
+HYPER_SERVER__PORT=9000 HYPER_SERVER__API_KEY=secret123 hypersearch serve
+```
+
+---
+
+## CLI Reference
+
+```bash
+# Server
+hypersearch serve --host 0.0.0.0 --port 8000 --workers 1
+
+# Ingest
+hypersearch ingest <collection> <file> \
+  --template "{title} {description}" \
+  --metadata "title,category,price" \
+  --batch-size 512
+
+# Search
+hypersearch search <collection> "query text" \
+  --top-k 5 \
+  --filters '{"severity": "HIGH"}'
+
+# Snapshot
+hypersearch snapshot <collection>
+
+# Restore
+hypersearch restore <collection> <snapshot_path>
+
+# All commands support --config to specify a custom YAML file
+hypersearch serve --config /path/to/hypersearch.yaml
+```
+
+---
+
+## REST API Reference
 
 All endpoints are documented at **http://127.0.0.1:8000/docs** (Swagger UI) or **http://127.0.0.1:8000/redoc** (ReDoc).
 
@@ -75,255 +377,64 @@ All endpoints are documented at **http://127.0.0.1:8000/docs** (Swagger UI) or *
 | `GET` | `/health` | System health (RAM, disk, uptime) |
 | `GET` | `/metrics` | Prometheus-format metrics |
 
-### Example: Create → Ingest → Search
-
-```bash
-# 1. Create a collection
-curl -X POST http://127.0.0.1:8000/v1/collections \
-  -H "Content-Type: application/json" \
-  -d '{"name": "vulnerabilities"}'
-
-# 2. Ingest a CSV dataset
-curl -X POST http://127.0.0.1:8000/v1/collections/vulnerabilities/ingest \
-  -F "file=@datasets/output/cve_summary.csv" \
-  -F 'config={"search_template": "{cve} {description}", "metadata_columns": ["cve", "cvss_score", "severity"]}'
-
-# 3. Search
-curl -X POST http://127.0.0.1:8000/v1/collections/vulnerabilities/search \
-  -H "Content-Type: application/json" \
-  -d '{"query": "remote code execution buffer overflow", "top_k": 5}'
-
-# 4. Search with metadata filters
-curl -X POST http://127.0.0.1:8000/v1/collections/vulnerabilities/search \
-  -H "Content-Type: application/json" \
-  -d '{"query": "SQL injection", "top_k": 10, "filters": {"severity": "CRITICAL"}}'
-```
-
-### Search Filter Operators
-
-```json
-{
-  "filters": {
-    "severity": "HIGH",
-    "cvss_score": {"$gte": 7.0},
-    "cwe_id": {"$in": ["CWE-79", "CWE-89"]},
-    "cvss_score": {"$between": [5.0, 9.0]}
-  }
-}
-```
-
-| Operator | SQL Equivalent | Example |
-|----------|---------------|---------|
-| `value` | `= value` | `"severity": "HIGH"` |
-| `$eq` | `= value` | `{"$eq": "HIGH"}` |
-| `$neq` | `!= value` | `{"$neq": "LOW"}` |
-| `$gt` | `> value` | `{"$gt": 7.0}` |
-| `$gte` | `>= value` | `{"$gte": 7.0}` |
-| `$lt` | `< value` | `{"$lt": 5.0}` |
-| `$lte` | `<= value` | `{"$lte": 5.0}` |
-| `$in` | `IN (...)` | `{"$in": ["a", "b"]}` |
-| `$between` | `BETWEEN a AND b` | `{"$between": [1, 10]}` |
-
 ---
 
-## CLI
+## Benchmarks
 
-HyperSearch includes a full CLI for all operations:
+See [BENCHMARKS.md](BENCHMARKS.md) for detailed performance data with system configuration.
+
+### Summary (CVE Dataset, CPU, `all-MiniLM-L6-v2`)
+
+| Dataset | Ingest Time | Search p50 | Search p95 | Steady RAM | DB Size |
+|---------|-------------|------------|------------|------------|---------|
+| 10,000 rows | ~108s | ~20ms | ~21ms | ~870 MB | 36 MB |
+| 50,000 rows | ~540s | ~25ms | ~28ms | ~950 MB | 177 MB |
+
+> Search latencies include query embedding + HNSW traversal. Cached queries (typeahead) run in ~10-18ms.
+
+### Running Benchmarks
 
 ```bash
-# Start the API server
-hypersearch serve --host 0.0.0.0 --port 8000
+# Run tiered benchmarks (10k + 50k)
+python -m benchmarks.pipeline --tiers 10000,50000 --output-md BENCHMARKS.md
 
-# Ingest a dataset
-hypersearch ingest my_collection data.csv \
-  --template "{title} {description}" \
-  --metadata "title,category,price"
-
-# Search from the terminal
-hypersearch search my_collection "waterproof hiking boots" --top-k 5
-
-# Backup a collection
-hypersearch snapshot my_collection
-
-# Restore from backup
-hypersearch restore my_collection snapshots/my_collection_20240101T120000Z.duckdb
-
-# All commands support --config to specify a custom YAML file
-hypersearch serve --config /path/to/hypersearch.yaml
+# HTTP-based benchmark (requires running server)
+python -m benchmarks.run --collection bench_cve --concurrency 1,5,10
 ```
 
 ---
 
 ## Demo Datasets
 
-HyperSearch ships with scripts to fetch real-world security datasets:
+### CVE Summary (Recommended)
 
-### CVE Summary (Recommended for Quick Start)
-
-Pre-enriched CVE records with descriptions and CVSS scores. ~30–50k rows, fast download.
+Pre-enriched CVE records with descriptions and CVSS scores. ~50k rows, fast download.
 
 ```bash
 python -m datasets.fetch_cve_summary --limit 50000
 # Output: datasets/output/cve_summary.csv
 ```
 
-### EPSS + NVD Enrichment
+### NVD Full Dataset
 
-Full EPSS probability scores enriched with NVD vulnerability descriptions. Slower (NVD API rate-limited) but richer.
-
-```bash
-python -m datasets.fetch_epss --limit 10000
-# Output: datasets/output/epss_enriched.csv
-
-# With NVD API key for faster enrichment:
-python -m datasets.fetch_epss --limit 50000 --nvd-api-key YOUR_KEY
-```
-
----
-
-## Benchmarking
-
-The built-in benchmark harness measures ingestion throughput and search latency under concurrent load.
+Complete NVD vulnerability data with technology detection. ~700k rows.
 
 ```bash
-# Start the server first, then in another terminal:
-python -m benchmarks.run \
-  --collection bench_cve \
-  --dataset datasets/output/cve_summary.csv \
-  --concurrency 1,5,10
-
-# Search-only (skip ingestion if collection already exists):
-python -m benchmarks.run --collection bench_cve --search-only --concurrency 1,5,10,20
+python -m datasets.fetch_nvd_full
+# Output: datasets/output/nvd_full.csv
 ```
 
-### Benchmark Output
+### Bootstrap Script
 
-Reports are saved to `benchmarks/reports/benchmark_<timestamp>.json`:
-
-```json
-{
-  "ingestion": {
-    "rows_ingested": 50000,
-    "ingest_time_seconds": 142.5,
-    "memory_delta_mb": 312.4
-  },
-  "search": {
-    "concurrency_1":  { "p50_ms": 8.2,  "p95_ms": 14.1, "p99_ms": 22.3 },
-    "concurrency_5":  { "p50_ms": 12.4, "p95_ms": 28.6, "p99_ms": 41.2 },
-    "concurrency_10": { "p50_ms": 18.9, "p95_ms": 45.3, "p99_ms": 67.8 },
-    "steady_state_memory_mb": 487.2
-  }
-}
-```
-
----
-
-## Configuration
-
-Copy `hypersearch.example.yaml` to `hypersearch.yaml`:
-
-```yaml
-server:
-  host: "0.0.0.0"
-  port: 8000
-  workers: 1                        # Keep at 1 unless you have >8GB RAM
-  api_key: null                     # Set a string to enable X-API-Key auth
-
-storage:
-  data_dir: "./data"                # Base directory for .duckdb collection files
-  snapshot_dir: "./snapshots"       # Directory for backup snapshots
-
-embedding:
-  model: "all-MiniLM-L6-v2"        # Any sentence-transformers model name
-  batch_size: 256                   # Rows per embedding batch (lower = less RAM)
-  device: "cpu"                     # "cpu" or "cuda"
-  dimensions: 384                   # Must match the model's output dimensionality
-
-defaults:
-  search_template: "{text}"         # Column interpolation for document construction
-  metadata_columns: []              # Columns to preserve as filterable metadata
-  top_k: 10                         # Default number of search results
-```
-
-### Environment Variable Overrides
-
-Any config value can be overridden via environment variables with the `HYPER_` prefix:
+One-command setup for development:
 
 ```bash
-HYPER_SERVER__PORT=9000 HYPER_SERVER__API_KEY=secret123 hypersearch serve
+./bootstrap.sh             # Full setup
+./bootstrap.sh --install   # Install Python dependencies
+./bootstrap.sh --dataset   # Download CVE demo dataset
+./bootstrap.sh --ingest    # Ingest into HyperSearch
+./bootstrap.sh --serve     # Start API server
 ```
-
----
-
-## Project Structure
-
-```
-StaticSearch/
-├── bootstrap.sh                # One-command setup script
-├── pyproject.toml              # Build system + dependency manifest
-├── hypersearch.example.yaml    # Reference configuration
-├── openapi.json                # Generated OpenAPI specification
-│
-├── hypersearch/                # Core package
-│   ├── __init__.py             # Package version
-│   ├── config.py               # YAML + env config loader
-│   ├── models.py               # Pydantic request/response schemas
-│   ├── db.py                   # DuckDB connection lifecycle
-│   ├── engine.py               # Vector search execution
-│   ├── ingest.py               # BYOD data processing pipeline
-│   ├── embeddings.py           # Sentence-transformer embedding manager
-│   ├── hot_reload.py           # Atomic staging + pointer swap
-│   ├── snapshot.py             # Backup/restore file operations
-│   ├── metrics.py              # Latency histograms + system stats
-│   ├── middleware.py           # API-key authentication
-│   ├── server.py               # FastAPI app factory
-│   ├── cli.py                  # Typer CLI
-│   └── routes/                 # Endpoint routers
-│       ├── collections.py      # CRUD for collections
-│       ├── ingest.py           # Dataset upload
-│       ├── search.py           # Vector search
-│       ├── snapshots.py        # Backup/restore
-│       └── health.py           # Health + Prometheus metrics
-│
-├── datasets/                   # Dataset acquisition scripts
-│   ├── fetch_epss.py           # EPSS + NVD enrichment
-│   └── fetch_cve_summary.py   # Pre-enriched CVE summaries
-│
-├── benchmarks/                 # Performance harness
-│   └── run.py                  # Benchmark runner
-│
-├── scripts/                    # Utility scripts
-│   └── export_openapi.py       # OpenAPI spec exporter
-│
-├── tests/                      # Test suite
-│   ├── conftest.py
-│   ├── test_collections.py
-│   ├── test_ingest.py
-│   ├── test_search.py
-│   └── test_snapshots.py
-│
-└── plan/                       # Architecture documentation
-    └── StaticSearch.md
-```
-
----
-
-## OpenAPI Specification
-
-Export the auto-generated OpenAPI spec:
-
-```bash
-# JSON format
-python scripts/export_openapi.py
-
-# YAML format
-python scripts/export_openapi.py --format yaml --output openapi.yaml
-
-# Or via bootstrap
-./bootstrap.sh --openapi
-```
-
-The spec is also available live at `http://127.0.0.1:8000/openapi.json` when the server is running.
 
 ---
 
@@ -349,13 +460,13 @@ User Data (CSV/JSON/Parquet)
           ▼
 ┌─────────────────────┐
 │  EmbeddingManager    │  ← all-MiniLM-L6-v2 (384 dims)
-│  _hyper_vector_      │     Batched, lazy-loaded
+│  _hyper_vector_      │     Batched, lazy-loaded, LRU-cached
 └─────────┬───────────┘
           │
           ▼
 ┌─────────────────────┐
 │  Staging DuckDB      │  ← {name}.staging.duckdb
-│  HNSW Index Build    │
+│  HNSW Index Build    │     M=48, ef_construction=256
 └─────────┬───────────┘
           │
           ▼ os.replace() (atomic)
@@ -364,6 +475,91 @@ User Data (CSV/JSON/Parquet)
 │  Serving Queries     │     Zero-downtime swap
 └─────────────────────┘
 ```
+
+### Project Structure
+
+```
+StaticSearch/
+├── hypersearch/                # Core package (pip install hypersearch)
+│   ├── __init__.py             # Public API: HyperSearch, Collection, SearchResults
+│   ├── client.py               # HyperSearch top-level client
+│   ├── collection.py           # Collection class (ingest/search/reindex)
+│   ├── results.py              # SearchHit, SearchResults dataclasses
+│   ├── config.py               # YAML + env config loader
+│   ├── models.py               # Pydantic request/response schemas
+│   ├── db.py                   # DuckDB connection lifecycle
+│   ├── engine.py               # Vector search execution
+│   ├── ingest.py               # Data processing pipeline
+│   ├── embeddings.py           # Sentence-transformer embedding manager
+│   ├── hot_reload.py           # Atomic staging + pointer swap
+│   ├── snapshot.py             # Backup/restore operations
+│   ├── metrics.py              # Latency histograms + system stats
+│   ├── middleware.py           # API-key authentication
+│   ├── server.py               # FastAPI app factory
+│   ├── cli.py                  # Typer CLI
+│   └── routes/                 # REST API endpoint routers
+│
+├── tests/                      # Comprehensive test suite
+├── benchmarks/                 # Performance harness
+├── datasets/                   # Dataset acquisition scripts
+├── .github/workflows/          # CI/CD (test + PyPI release)
+├── pyproject.toml              # Build system + dependency manifest
+├── BENCHMARKS.md               # Performance results
+└── README.md                   # This file
+```
+
+---
+
+## Development
+
+### Setup
+
+```bash
+git clone https://github.com/vanditsramblings/StaticSearch.git
+cd StaticSearch
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+### Running Tests
+
+```bash
+# Fast tests only
+python -m pytest tests/ -v -m "not slow"
+
+# Full suite
+python -m pytest tests/ -v
+
+# With coverage
+python -m pytest tests/ -v --tb=short
+```
+
+### Linting
+
+```bash
+ruff check hypersearch/ tests/
+ruff format hypersearch/ tests/
+```
+
+### Building
+
+```bash
+python -m build
+pip install dist/hypersearch-*.whl
+```
+
+---
+
+## OpenAPI Specification
+
+Export the auto-generated OpenAPI spec:
+
+```bash
+python scripts/export_openapi.py
+python scripts/export_openapi.py --format yaml --output openapi.yaml
+```
+
+The spec is also available live at `http://127.0.0.1:8000/openapi.json` when the server is running.
 
 ---
 

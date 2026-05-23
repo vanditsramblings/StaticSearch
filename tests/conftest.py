@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import shutil
 from pathlib import Path
 from typing import Iterator
@@ -55,3 +57,55 @@ def client(settings: Settings) -> Iterator[TestClient]:
         yield tc
 
     app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# Library API fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def hs(tmp_path: Path):
+    """Create a HyperSearch client with temporary storage."""
+    from hypersearch import HyperSearch
+
+    data_dir = tmp_path / "hs_data"
+    snap_dir = tmp_path / "hs_snaps"
+
+    hs = HyperSearch(data_dir=data_dir, snapshot_dir=snap_dir, batch_size=32)
+    yield hs
+    hs.close()
+
+
+@pytest.fixture()
+def sample_csv(tmp_path: Path) -> Path:
+    """Create a sample CSV file for testing."""
+    csv_file = tmp_path / "sample.csv"
+    with open(csv_file, "w", newline="") as f:
+        writer = csv.DictWriter(
+            f, fieldnames=["title", "description", "category", "price"]
+        )
+        writer.writeheader()
+        for i in range(20):
+            writer.writerow(
+                {
+                    "title": f"Product {i}",
+                    "description": f"A great product number {i} with special features",
+                    "category": "outdoor" if i % 2 == 0 else "indoor",
+                    "price": str(10.0 + i * 5),
+                }
+            )
+    return csv_file
+
+
+@pytest.fixture()
+def small_csv(tmp_path: Path) -> Path:
+    """Create a minimal 3-row CSV for quick tests."""
+    csv_file = tmp_path / "small.csv"
+    with open(csv_file, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["text", "label"])
+        writer.writeheader()
+        writer.writerow({"text": "remote code execution vulnerability", "label": "critical"})
+        writer.writerow({"text": "SQL injection in login form", "label": "high"})
+        writer.writerow({"text": "low severity info disclosure", "label": "low"})
+    return csv_file

@@ -226,5 +226,8 @@ hypersearch.yaml
 datasets/output/
 benchmarks/reports/
 openapi.json
-plan/*
 .DS_Store
+
+# Build artifacts
+dist/
+*.whl

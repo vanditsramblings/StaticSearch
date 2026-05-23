@@ -149,6 +149,27 @@ def warmup(model_name: str = "all-MiniLM-L6-v2", device: str = "cpu") -> None:
     logger.info("Embedding model warmed up and ready")
 
 
+def model_info(model_name: str = "all-MiniLM-L6-v2", device: str = "cpu") -> dict:
+    """Return info about the loaded embedding model.
+
+    Returns:
+        dict with ``name``, ``dimension``, ``device``, and ``loaded`` keys.
+    """
+    if _model is not None and _model_name == model_name:
+        return {
+            "name": _model_name,
+            "dimension": int(_model.get_sentence_embedding_dimension()),
+            "device": str(_model.device),
+            "loaded": True,
+        }
+    return {
+        "name": model_name,
+        "dimension": None,
+        "device": device,
+        "loaded": False,
+    }
+
+
 def clear_cache() -> None:
     """Clear the query embedding cache. Used by tests."""
     _query_cache.clear()

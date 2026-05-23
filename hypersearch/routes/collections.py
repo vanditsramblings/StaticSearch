@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
@@ -41,7 +41,7 @@ def create_collection(
 
     return CollectionResponse(
         name=body.name,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         storage_path=str(db_path),
     )
 
@@ -60,7 +60,7 @@ def list_all_collections(
         collections=[
             CollectionSummary(
                 name=c["name"],
-                created_at=c["created_at"] or datetime.utcnow().isoformat(),
+                created_at=c["created_at"] or datetime.now(timezone.utc).isoformat(),
                 row_count=c["row_count"],
                 size_bytes=c["size_bytes"],
             )
